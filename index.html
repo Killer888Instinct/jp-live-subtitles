@@ -19,7 +19,7 @@ select{background:#2b2f37;color:var(--tx);border:0;border-radius:8px;padding:6px
 <div class="row"><button id="go">Start</button><button id="pip" class="s" style="display:none">Float subtitles</button><button id="stop" class="s" style="display:none">Stop</button></div>
 <div class="bar" id="bar"><i></i></div><div id="be" style="font-size:13px;color:var(--mut)"></div><div id="st">Click Start, choose the tab with your video, and tick "Also share tab audio".</div>
 <div id="sub"><span class="busy">Subtitles will appear here.</span></div>
-<details><summary>Options</summary><p style="margin-top:8px">Model: <select id="q"><option value="auto">Automatic</option><option value="base">Light (fastest, rougher)</option><option value="small">Balanced</option><option value="large">Best (about 1.6 GB download, needs a strong GPU)</option></select></p><p style="margin-top:8px">Hardware: <select id="hw"><option value="auto">Automatic (NPU, then GPU, then CPU)</option><option value="npu">NPU preferred</option><option value="gpu">GPU only</option><option value="cpu">CPU only</option></select></p></details>
+<details><summary>Options</summary><p style="margin-top:8px">Model: <select id="q"><option value="auto">Automatic</option><option value="base">Light (fastest, rougher)</option><option value="small">Balanced</option></select></p><p style="margin-top:8px">Hardware: <select id="hw"><option value="auto">Automatic (NPU, then GPU, then CPU)</option><option value="npu">NPU preferred</option><option value="gpu">GPU only</option><option value="cpu">CPU only</option></select></p></details>
 </main>
 <script type="module">
 const $=id=>document.getElementById(id);
@@ -32,7 +32,6 @@ async function hasNPU(){try{if(!navigator.ml)return false;const c=await navigato
 async function gpuOK(){if(!navigator.gpu)return false;try{return !!(await navigator.gpu.requestAdapter())}catch(e){return false}}
 function modelFor(q,webgpu){
  if(!webgpu) return {id:'onnx-community/whisper-base',dtype:'q8',label:'Light model'};
- if(q==='large') return {id:'onnx-community/whisper-large-v3-turbo',dtype:{encoder_model:'fp16',decoder_model_merged:'q4'},label:'Best model'};
  if(q==='base') return {id:'onnx-community/whisper-base',dtype:{encoder_model:'fp16',decoder_model_merged:'q4'},label:'Light model'};
  return {id:'onnx-community/whisper-small',dtype:{encoder_model:'fp16',decoder_model_merged:'q4'},label:'Balanced model'};
 }
