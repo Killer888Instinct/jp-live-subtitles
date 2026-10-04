@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Japanese live subtitles</title>
+<style>
+:root{color-scheme:dark;--bg:#14161a;--card:#1d2026;--tx:#e8eaed;--mut:#9aa0a6;--ac:#8ab4f8}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,Roboto,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center}
+main{width:100%;max-width:860px;padding:28px 20px;display:flex;flex-direction:column;gap:18px}
+h1{font-size:22px;font-weight:600;margin:0}p{margin:0;color:var(--mut)}
+button{font:inherit;border:0;border-radius:999px;padding:12px 26px;background:var(--ac);color:#0b1d3a;font-weight:600;cursor:pointer}
+button.s{background:#2b2f37;color:var(--tx);padding:8px 16px;font-weight:500}button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+#sub{background:var(--card);border-radius:20px;min-height:200px;padding:26px;display:flex;flex-direction:column;justify-content:flex-end;gap:10px;font-size:30px;line-height:1.35}
+#sub .old{color:var(--mut);font-size:22px}#sub .busy{color:var(--mut);font-size:15px}
+#st{font-size:14px;color:var(--mut);min-height:20px}.bar{height:4px;background:#2b2f37;border-radius:4px;overflow:hidden;display:none}.bar i{display:block;height:100%;width:0;background:var(--ac)}
+select{background:#2b2f37;color:var(--tx);border:0;border-radius:8px;padding:6px 10px;font:inherit;font-size:14px}details{color:var(--mut);font-size:14px}
+</style></head><body><main>
+<h1>Japanese live subtitles</h1>
+<p>Plays in another tab, English subtitles appear here. Runs on your computer. Your audio never leaves it; only the speech model is downloaded once.</p>
+<div class="row"><button id="go">Start</button><button id="pip" class="s" style="display:none">Float subtitles</button><button id="stop" class="s" style="display:none">Stop</button></div>
+<div class="bar" id="bar"><i></i></div><div id="be" style="font-size:13px;color:var(--mut)"></div><div id="st">Click Start, choose the tab with your video, and tick "Also share tab audio".</div>
+<div id="sub"><span class="busy">Subtitles will appear here.</span></div>
+<details><summary>Options</summary><p style="margin-top:8px">Model: <select id="q"><option value="auto">Automatic</option><option value="base">Light (fastest, rougher)</option><option value="small">Balanced</option><option value="large">Best (about 1.6 GB download, needs a strong GPU)</option></select></p><p style="margin-top:8px">Hardware: <select id="hw"><option value="auto">Automatic (NPU, then GPU, then CPU)</option><option value="npu">NPU preferred</option><option value="gpu">GPU only</option><option value="cpu">CPU only</option></select></p></details>
+</main>
+<script type="module">
+const $=id=>document.getElementById(id);
+const st=t=>$('st').textContent=t, bar=$('bar');
+let asr=null, stream=null, ctx=null, node=null, running=false, queue=[], working=false, lines=[], pipWin=null, modelName='';
+const render=()=>{const el=$('sub');el.innerHTML='';const show=lines.slice(-3);if(!show.length){el.innerHTML='<span class="busy">Listening…</span>'}
+ show.forEach((t,i)=>{const d=document.createElement('div');if(i<show.length-1)d.className='old';d.textContent=t;el.appendChild(d)});
+ if(pipWin){const b=pipWin.document.body;b.innerHTML='';show.slice(-2).forEach((t,i,a)=>{const d=document.createElement('div');d.textContent=t;d.style.cssText='font:600 '+(i==a.length-1?'26':'18')+'px system-ui;color:'+(i==a.length-1?'#fff':'#aaa')+';margin:4px 0';b.appendChild(d)})}};
+async function hasNPU(){try{if(!navigator.ml)return false;const c=await navigator.ml.createContext({deviceType:'npu'});return !!c}catch(e){return false}}
+async function gpuOK(){if(!navigator.gpu)return false;try{return !!(await navigator.gpu.requestAdapter())}catch(e){return false}}
+function modelFor(q,webgpu){
+ if(!webgpu) return {id:'onnx-community/whisper-base',dtype:'q8',label:'Light model'};
+ if(q==='large') return {id:'onnx-community/whisper-large-v3-turbo',dtype:{encoder_model:'fp16',decoder_model_merged:'q4'},label:'Best model'};
+ if(q==='base') return {id:'onnx-community/whisper-base',dtype:{encoder_model:'fp16',decoder_model_merged:'q4'},label:'Light model'};
+ return {id:'onnx-community/whisper-small',dtype:{encoder_model:'fp16',decoder_model_merged:'q4'},label:'Balanced model'};
+}
+async function buildPlans(){
+ const q=$('q').value,hw=$('hw').value,gpu=await gpuOK(),plans=[];
+ const npu=(hw==='auto'||hw==='npu')&&gpu&&await hasNPU();
+ // WebNN needs fixed shapes, and Whisper's decoder grows every step, so only the encoder (the heavy 30 s block) goes to the NPU; the decoder stays on the GPU.
+ if(npu) plans.push({...modelFor(q,true),device:{encoder_model:'webnn-npu',decoder_model_merged:'webgpu'},opts:{session_options:{freeDimensionOverrides:{batch_size:1}}},name:'NPU (encoder) + GPU (decoder)'});
+ if(gpu&&hw!=='cpu') plans.push({...modelFor(q,true),device:'webgpu',name:'GPU'});
+ plans.push({...modelFor(q,false),dtype:'q8',device:'wasm',name:'CPU'});
+ return plans;
+}
+async function load(){
+ const plans=await buildPlans(); const key=plans.map(p=>p.name).join();
+ if(asr&&modelName===key)return;
+ bar.style.display='block';
+ const {pipeline,env}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6');
+ env.allowLocalModels=false;
+ let lastErr=null;
+ for(const m of plans){
+  const files={};
+  const cb=p=>{if(p.status==='progress'&&p.file){files[p.file]=[p.loaded,p.total];let l=0,t=0;for(const k in files){l+=files[k][0];t+=files[k][1]}bar.firstChild.style.width=(t?l/t*100:0)+'%';st('Downloading '+m.label+'… '+Math.round(l/1e6)+' of '+Math.round(t/1e6)+' MB (first time only)')}};
+  st('Loading '+m.label+' on '+m.name+'…');
+  try{
+   const a=await pipeline('automatic-speech-recognition',m.id,{device:m.device,dtype:m.dtype,progress_callback:cb,...(m.opts||{})});
+   const t0=performance.now();
+   await a(new Float32Array(16000*3).map((_,i)=>0.05*Math.sin(i/30)),{task:'translate',language:'japanese'}); // warm-up doubles as a check that this backend really runs
+   asr=a;modelName=key;$('be').textContent='Running on: '+m.name+' · '+m.label+' (warm-up '+Math.round(performance.now()-t0)+' ms)';
+   bar.style.display='none';return;
+  }catch(e){lastErr=e;console.warn(m.name,'failed',e);$('be').textContent=m.name+' not available here ('+String(e.message||e).slice(0,80)+'), trying the next option.'}
+ }
+ bar.style.display='none';throw lastErr||new Error('No backend could start');
+}
+const WORKLET=`class P extends AudioWorkletProcessor{process(i){const c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor('p',P)`;
+async function start(){
+ $('go').disabled=true;
+ try{ await load() }catch(e){st('Could not load the model: '+e.message);$('go').disabled=false;return}
+ try{ stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},preferCurrentTab:false,selfBrowserSurface:'exclude',systemAudio:'include'}) }
+ catch(e){st('Sharing was cancelled. Click Start and pick the tab with your video.');$('go').disabled=false;return}
+ if(!stream.getAudioTracks().length){stream.getTracks().forEach(t=>t.stop());st('No audio was shared. Click Start, choose a Chrome Tab (not a window), and tick "Also share tab audio".');$('go').disabled=false;return}
+ stream.getVideoTracks().forEach(t=>t.stop()); // audio only, no need for the picture
+ stream.getAudioTracks()[0].onended=stop;
+ ctx=new AudioContext({sampleRate:16000});
+ await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET],{type:'text/javascript'})));
+ const src=ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+ node=new AudioWorkletNode(ctx,'p');src.connect(node);
+ let buf=[],len=0,quiet=0,voiced=false;const SR=16000;
+ node.port.onmessage=ev=>{const c=ev.data;let e=0;for(let i=0;i<c.length;i++)e+=c[i]*c[i];const rms=Math.sqrt(e/c.length);const loud=rms>0.012;
+  buf.push(c);len+=c.length;if(loud){voiced=true;quiet=0}else quiet+=c.length;
+  if(!voiced&&len>SR*1.5){buf=[buf[buf.length-1]];len=buf[0].length;quiet=0;return}
+  const secs=len/SR;
+  if(voiced&&((quiet>SR*0.55&&secs>2.0)||secs>9)){const out=new Float32Array(len);let o=0;for(const b of buf){out.set(b,o);o+=b.length}buf=[];len=0;quiet=0;voiced=false;enqueue(out)}};
+ running=true;$('stop').style.display='';$('go').style.display='none';if('documentPictureInPicture' in window)$('pip').style.display='';
+ st('Listening. Subtitles lag a few seconds behind the video.');lines=[];render();
+}
+function enqueue(a){queue.push(a);while(queue.reduce((s,x)=>s+x.length,0)>16000*30)queue.shift();pump()}
+async function pump(){if(working)return;working=true;
+ while(queue.length&&running){const a=queue.shift();let mx=0;for(let i=0;i<a.length;i++)mx=Math.max(mx,Math.abs(a[i]));if(mx<0.02)continue;
+  try{const r=await asr(a,{task:'translate',language:'japanese',return_timestamps:false});let t=(r.text||'').trim();
+   const junk=/^(\[.*\]|\(.*\)|♪.*|thank you\.?|thanks for watching\.?|you|\(?subscribe to (the|my) channel\)?\.?)$/i.test(t);
+   if(t&&!junk&&t!==lines[lines.length-1]){lines.push(t);if(lines.length>30)lines.shift();render()}
+  }catch(e){st('Translation error: '+e.message)}
+  if(queue.length>2)st('Catching up…');else if(running)st('Listening. Subtitles lag a few seconds behind the video.')}
+ working=false}
+function stop(){running=false;queue=[];try{node&&node.disconnect()}catch(e){}try{ctx&&ctx.close()}catch(e){}stream&&stream.getTracks().forEach(t=>t.stop());
+ $('stop').style.display='none';$('go').style.display='';$('go').disabled=false;$('pip').style.display='none';st('Stopped.');if(pipWin){pipWin.close();pipWin=null}}
+$('q').onchange=$('hw').onchange=()=>{asr=null};$('go').onclick=start;$('stop').onclick=stop;
+$('pip').onclick=async()=>{try{pipWin=await documentPictureInPicture.requestWindow({width:640,height:150});pipWin.document.body.style.cssText='margin:0;padding:10px 16px;background:#000;overflow:hidden';pipWin.addEventListener('pagehide',()=>pipWin=null);render()}catch(e){st('Floating window not supported here.')}};
+if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia){st('This browser cannot capture tab audio. Use Chrome or Edge on a computer.');$('go').disabled=true}
+</script></body></html>
