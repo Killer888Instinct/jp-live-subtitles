@@ -89,13 +89,21 @@ async function start(){
  st('Listening. Subtitles lag a few seconds behind the video.');lines=[];render();
 }
 function enqueue(a){queue.push(a);while(queue.reduce((s,x)=>s+x.length,0)>16000*30)queue.shift();pump()}
+const norm=t=>t.toLowerCase().replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+// Whisper sometimes loops ("I'm sorry. I'm sorry. I'm sorry..."). Keep at most 2 repeats of any 1-6 word phrase.
+function collapse(t){let w=t.split(/\s+/);for(let n=1;n<=6;n++){for(let i=0;i+n<=w.length;){const k=norm(w.slice(i,i+n).join(' '));let r=1;while(k&&i+(r+1)*n<=w.length&&norm(w.slice(i+r*n,i+(r+1)*n).join(' '))===k)r++;if(r>2)w.splice(i+2*n,(r-2)*n);i+=n}}return w.join(' ')}
+// If the new line starts with the tail of the previous one, drop that overlap.
+function trimOverlap(prev,t){if(!prev)return t;const p=prev.split(/\s+/),w=t.split(/\s+/);for(let k=Math.min(p.length,w.length,12);k>=3;k--){if(norm(p.slice(-k).join(' '))===norm(w.slice(0,k).join(' ')))return w.slice(k).join(' ')}return t}
+function voicedFrames(a){const F=320;let n=0;for(let i=0;i+F<=a.length;i+=F){let e=0;for(let j=0;j<F;j++)e+=a[i+j]*a[i+j];if(Math.sqrt(e/F)>0.012)n++}return n}
 async function pump(){if(working)return;working=true;
  while(queue.length&&running){const a=queue.shift();let mx=0;for(let i=0;i<a.length;i++)mx=Math.max(mx,Math.abs(a[i]));if(mx<0.02)continue;
-  try{const r=await asr(a,{task:'translate',language:'japanese',return_timestamps:false});let t=(r.text||'').trim();
-   const junk=/^(\[.*\]|\(.*\)|♪.*|thank you\.?|thanks for watching\.?|you|\(?subscribe to (the|my) channel\)?\.?)$/i.test(t);
-   if(t&&!junk&&t!==lines[lines.length-1]){lines.push(t);if(lines.length>30)lines.shift();render()}
+  if(voicedFrames(a)<15)continue; // under 0.3 s of real sound: noise or a click, skip it
+  try{const secs=a.length/16000;const r=await asr(a,{task:'translate',language:'japanese',return_timestamps:false,max_new_tokens:Math.min(220,Math.round(secs*7)+16),no_repeat_ngram_size:6});let t=collapse((r.text||'').trim());
+   const junk=/^(\[.*\]|\(.*\)|\u266a.*|thank you\.?|thanks for watching\.?|you|\(?subscribe to (the|my) channel\)?\.?)$/i.test(t);
+   if(t&&!junk){const recent=lines.slice(-4).map(norm);t=trimOverlap(lines[lines.length-1],t).trim();
+    if(t&&norm(t)&&!recent.includes(norm(t))){lines.push(t);if(lines.length>30)lines.shift();render()}}
   }catch(e){st('Translation error: '+e.message)}
-  if(queue.length>2)st('Catching up…');else if(running)st('Listening. Subtitles lag a few seconds behind the video.')}
+  if(queue.length>2)st('Catching up...');else if(running)st('Listening. Subtitles lag a few seconds behind the video.')}
  working=false}
 function stop(){running=false;queue=[];try{node&&node.disconnect()}catch(e){}try{ctx&&ctx.close()}catch(e){}stream&&stream.getTracks().forEach(t=>t.stop());
  $('stop').style.display='none';$('go').style.display='';$('go').disabled=false;$('pip').style.display='none';st('Stopped.');if(pipWin){pipWin.close();pipWin=null}}
