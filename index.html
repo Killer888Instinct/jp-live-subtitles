@@ -15,9 +15,9 @@ button.s{background:#2b2f37;color:var(--tx);padding:8px 16px;font-weight:500}but
 select{background:#2b2f37;color:var(--tx);border:0;border-radius:8px;padding:6px 10px;font:inherit;font-size:14px}details{color:var(--mut);font-size:14px}
 </style></head><body><main>
 <h1>Japanese live subtitles</h1>
-<p>Plays in another tab, English subtitles appear here. Runs on your computer. Your audio never leaves it; only the speech model is downloaded once.</p>
+<p>Plays in another tab, English subtitles appear here. Listens to the tab itself, so computer volume, mute and headphones don't matter. Runs on your computer. Your audio never leaves it; only the speech model is downloaded once.</p>
 <div class="row"><button id="go">Start</button><button id="pip" class="s" style="display:none">Float subtitles</button><button id="stop" class="s" style="display:none">Stop</button></div>
-<div class="bar" id="bar"><i></i></div><div id="be" style="font-size:13px;color:var(--mut)"></div><div id="lvl" title="Sound the page is hearing"><i></i></div><div id="st">Click Start, choose the tab with your video, and tick "Also share tab audio".</div>
+<div class="bar" id="bar"><i></i></div><div id="be" style="font-size:13px;color:var(--mut)"></div><div id="lvl" title="Sound the page is hearing"><i></i></div><div id="st">Click Start, choose the tab with your video, and tick "Also share tab audio". Keep the video's own volume up a little and the tab unmuted.</div>
 <div id="sub"><span class="busy">Subtitles will appear here.</span></div>
 <details><summary>Options</summary><p style="margin-top:8px">Model: <select id="q"><option value="auto">Automatic</option><option value="base">Light (fastest, rougher)</option><option value="small">Balanced</option></select></p><p style="margin-top:8px">Hardware: <select id="hw"><option value="auto">Automatic (NPU, then GPU, then CPU)</option><option value="npu">NPU preferred</option><option value="gpu">GPU only</option><option value="cpu">CPU only</option></select></p></details>
 </main>
@@ -78,8 +78,14 @@ async function start(){
  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET],{type:'text/javascript'})));
  const src=ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
  node=new AudioWorkletNode(ctx,'p');src.connect(node);
- let buf=[],len=0,quiet=0,voiced=false,floor=0.004,lvT=0;const SR=16000;const lv=document.querySelector('#lvl i');
- node.port.onmessage=ev=>{const c=ev.data;let e=0;for(let i=0;i<c.length;i++)e+=c[i]*c[i];const rms=Math.sqrt(e/c.length);if(rms<floor*2.5)floor=floor*0.97+rms*0.03;const loud=rms>Math.max(0.005,floor*3);const nowT=performance.now();if(nowT-lvT>100){lvT=nowT;lv.style.width=Math.min(100,Math.sqrt(rms/0.15)*100)+'%';lv.className=loud?'on':''}
+ const SR=16000;let buf=[],len=0,quiet=0,voiced=false,floor=0.004,lvT=0;const lv=document.querySelector('#lvl i');
+ let pk=0,gain=1,silentN=0,hintT=0;
+ node.port.onmessage=ev=>{const raw=ev.data;let e0=0;for(let i=0;i<raw.length;i++)e0+=raw[i]*raw[i];const r0=Math.sqrt(e0/raw.length);pk=Math.max(r0,pk*0.9995);
+  // Auto level: if the video's own volume is low, scale the capture up so quiet playback still gets subtitles. A fully muted tab sends true silence and cannot be recovered.
+  const tg=pk>0.0003?Math.min(60,Math.max(1,0.08/pk)):1;gain+=(tg-gain)*0.02;
+  const c=new Float32Array(raw.length);for(let i=0;i<raw.length;i++){const v=raw[i]*gain;c[i]=v>1?1:v<-1?-1:v}
+  if(r0<0.00005){silentN+=raw.length;if(silentN>SR*8&&performance.now()-hintT>20000){hintT=performance.now();st('The shared tab is sending silence. Check the video is playing and the tab is not muted (right-click the tab). Your computer volume and headphones do not matter.')}}else silentN=0;
+  let e=0;for(let i=0;i<c.length;i++)e+=c[i]*c[i];const rms=Math.sqrt(e/c.length);if(rms<floor*2.5)floor=floor*0.97+rms*0.03;const loud=rms>Math.max(0.005,floor*3);const nowT=performance.now();if(nowT-lvT>100){lvT=nowT;lv.style.width=Math.min(100,Math.sqrt(rms/0.15)*100)+'%';lv.className=loud?'on':''}
   buf.push(c);len+=c.length;if(loud){voiced=true;quiet=0}else quiet+=c.length;
   if(!voiced&&len>SR*1.5){buf=[buf[buf.length-1]];len=buf[0].length;quiet=0;return}
   const secs=len/SR;
